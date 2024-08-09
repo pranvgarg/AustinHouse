@@ -1,7 +1,4 @@
 # AustinHouse
-
-Based on the content of the PDF you provided, I can help you create a detailed and attractive README file for your GitHub project. Below is a suggested structure for your README.md file:
-
 ---
 
 # Austin House Price Prediction Project
