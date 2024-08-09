@@ -1,0 +1,644 @@
+## Approach
+
+### Approach Followed in the Code
+
+1. **Data Import and Initial Exploration**:
+    - Load the dataset and display its structure.
+    - Perform initial data exploration to understand the data characteristics.
+
+2. **Data Manipulation**:
+    - Add a new column `logLatestPrice` by taking the logarithm of `latestPrice`.
+    - Derive the age of the house and categorize it into different age groups.
+  
+3. **Binary Columns and Amenities**:
+    - Convert binary columns (`hasAssociation`, `hasGarage`, `hasSpa`, `hasView`) to numeric.
+    - Create a new feature `total_amenities` by summing up the binary columns.
+
+4. **Sale Date Features**:
+    - Extract and convert sale date components into year, month, and day.
+    - Categorize the sale date into seasons (`Winter`, `Spring`, `Summer`, `Fall`).
+
+5. **Geospatial Features**:
+    - Perform clustering based on latitude and longitude to create a new feature `crossCluster`.
+
+6. **Calculating Correlations and Aggregating Amenities**:
+    - Calculate correlations of various amenity features with the target variable `logLatestPrice`.
+    - Aggregate amenities with specified weights to create a new `total_amenities` feature.
+
+7. **Handling Missing Values**:
+    - Handle missing values by replacing them with -1 and dropping any remaining NA values.
+    - Convert categorical variables to factors.
+
+8. **Data Visualization**:
+    - Plot a correlation matrix to understand the relationships between different variables.
+
+9. **Feature Engineering**:
+    - Define various formulas for the regression models, selecting different sets of features based on their correlation with the target variable.
+
+10. **Modeling**:
+    - Split the data into training and test sets.
+    - Train and evaluate multiple models including Regression Tree, Pruned Tree, Bagging with Random Forest, Random Forest with different `mtry` values, XGBoost, BART, Ridge, and Lasso Regression.
+    - Calculate and compare the MSE and RMSE for each model to identify the best performer.
+
+11. **Model Comparison and Conclusion**:
+    - Summarize the performance of different models.
+    - Provide insights and recommendations based on the model performance.
+
+12. **Applying the Best Model on the Holdout Set**:
+    - Load and preprocess the holdout dataset similarly to the training dataset.
+    - Train the BART model using the training data.
+    - Make predictions on the holdout dataset using the trained BART model.
+    - Export the updated holdout dataset with the predicted `latestPrice`.
+
+### Summary:
+The approach involves comprehensive data preprocessing, feature engineering, model training, and evaluation. It concludes with applying the best model (BART) on a holdout dataset to make predictions, ensuring that all preprocessing steps are consistently applied to both the training and holdout datasets.
+
+
+---
+title: "PRANAV GARG (PG26855) PROJECT"
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+date: "2024-07-24"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Importing Libraries
+```{r libraries, include=FALSE}
+library(rpart)
+library(rpart.plot)
+library(MASS)
+library(caret)
+library(randomForest)
+library(gbm)
+library(tidyverse)
+library(dplyr)
+library(tree)
+library(BayesTree) 
+library(BART)
+library(reshape2)
+library(corrplot)
+set.seed(19)
+```
+
+## Data Import and Initial Exploration
+```{r data_import}
+austin_data <- read.csv("austinhouses.csv")
+names(austin_data)
+glimpse((austin_data))
+```
+
+## Data Manipulation
+```{r data_manipulation}
+# Adding the logLatestPrice to the original df
+austin_data <- austin_data %>%
+  select(-streetAddress, -description) %>%
+  mutate(logLatestPrice = log(latestPrice))
+
+# Derive the age of the house
+current_year <- year(Sys.Date())
+austin_data <- austin_data %>%
+  mutate(houseAge = current_year - yearBuilt,
+         property_age_category = cut(houseAge, 
+                                     breaks = c(-Inf, 10, 30, 50, Inf), 
+                                     labels = c("New", "Moderate", "Old", "Very Old")),
+         property_age_category = as.factor(property_age_category)) %>%
+  select(-yearBuilt)
+```
+
+### Binary Columns and Amenities
+```{r binary_columns_amenities}
+# Convert binary columns to numeric and aggregate amenities
+binary_columns <- c('hasAssociation', 'hasGarage', 'hasSpa', 'hasView')
+austin_data[binary_columns] <- lapply(austin_data[binary_columns], as.numeric)
+
+# Create a total_amenities feature
+austin_data <- austin_data %>%
+  mutate(total_amenities = rowSums(select(., all_of(binary_columns))))
+
+# Ensure we retain the individual binary features
+#austin_data <- austin_data %>%
+#  select(-hasAssociation, -hasSpa, -hasView, -hasGarage)
+
+```
+
+### Sale Date Features
+```{r sale_date_features}
+# Extract and convert sale date components
+austin_data <- austin_data %>%
+  mutate(saleDate = as.Date(latest_saledate, format = "%Y-%m-%d"),
+         saleYear = year(latest_saledate),
+         saleMonth = month(latest_saledate),
+         saleDay = day(latest_saledate)) %>%
+  mutate(season = case_when(
+    saleMonth %in% c(12, 1, 2) ~ "Winter",
+    saleMonth %in% c(3, 4, 5) ~ "Spring",
+    saleMonth %in% c(6, 7, 8) ~ "Summer",
+    saleMonth %in% c(9, 10, 11) ~ "Fall"
+  )) %>%
+  mutate(season = factor(season, levels = c("Winter", "Spring", "Summer", "Fall"))) %>%
+  select(-latest_saledate, -saleDay, -saleDate)
+```
+
+### Geospatial Features
+```{r geospatial_features}
+# Clustering based on latitude and longitude
+set.seed(123)
+coords <- austin_data %>% select(latitude, longitude)
+clusters <- kmeans(coords, centers = 5)$cluster
+austin_data <- austin_data %>% mutate(crossCluster = as.factor(clusters))
+```
+
+### Calculating Correlations and Aggregating Amenities
+```{r correlations_amenities}
+# Calculate correlations and aggregate amenities with weights
+amenity_features <- c("numOfAccessibilityFeatures", "numOfAppliances", "numOfParkingFeatures",
+                      "numOfPatioAndPorchFeatures", "numOfSecurityFeatures", "numOfWaterfrontFeatures",
+                      "numOfWindowFeatures", "numOfCommunityFeatures")
+
+correlations <- sapply(austin_data[amenity_features], function(x) cor(x, austin_data$logLatestPrice, use = "complete.obs"))
+print(correlations)
+
+weights <- c(numOfAccessibilityFeatures = 1, numOfAppliances = 2, numOfParkingFeatures = 1.5,
+             numOfPatioAndPorchFeatures = 1, numOfSecurityFeatures = 1, numOfWaterfrontFeatures = 2.5,
+             numOfWindowFeatures = 1, numOfCommunityFeatures = 1.5)
+
+austin_data <- austin_data %>%
+  mutate(total_amenities = numOfAccessibilityFeatures * weights["numOfAccessibilityFeatures"] +
+                          numOfAppliances * weights["numOfAppliances"] +
+                          numOfParkingFeatures * weights["numOfParkingFeatures"] +
+                          numOfPatioAndPorchFeatures * weights["numOfPatioAndPorchFeatures"]+
+                          numOfSecurityFeatures * weights["numOfSecurityFeatures"] +
+                          numOfWaterfrontFeatures * weights["numOfWaterfrontFeatures"] +
+                          numOfWindowFeatures * weights["numOfWindowFeatures"] +
+                          numOfCommunityFeatures * weights["numOfCommunityFeatures"]) %>%
+  select(-all_of(amenity_features))
+```
+
+### Handling Missing Values
+```{r missing_values}
+# Handling missing values
+austin_data[is.na(austin_data)] <- -1
+austin_data <- austin_data %>%
+  drop_na()
+
+# Convert categorical variables to factors
+austin_data <- austin_data %>%
+  mutate(
+    zipcode = as.factor(zipcode),
+    garageSpaces = factor(garageSpaces),
+    homeType = factor(homeType)
+  ) %>%
+  select(-homeType) #removing Hometype becuase 
+# glimpse(austin_data)
+head(austin_data)
+```
+
+## Data Visualization
+### Plot Correlation Matrix
+```{r correlation_matrix}
+# Plot correlation matrix
+columns <- c( 
+  "zipcode" ,"latitude" , "longitude","garageSpaces","latest_salemonth" ,"latest_saleyear" ,"numOfPhotos","lotSizeSqFt","livingAreaSqFt" ,
+  "numOfBathrooms" ,"numOfBedrooms","numOfStories",
+  "houseAge","property_age_category","total_amenities","saleYear" ,"saleMonth","season","crossCluster"  
+)
+
+numeric_data <- austin_data %>% select_if(is.numeric)
+cor_matrix <- cor(numeric_data, use = "complete.obs")
+corrplot(cor_matrix, method = "circle")
+
+'
+melted_cor_matrix <- melt(cor_matrix)
+ggplot(data = melted_cor_matrix, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="Correlation") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                   size = 15, hjust = 1)) +
+  coord_fixed()
+'
+```
+```{r}
+formulaa = logLatestPrice ~  zipcode + latitude + longitude + garageSpaces + latest_salemonth + latest_saleyear + numOfPhotos + lotSizeSqFt + livingAreaSqFt + avgSchoolDistance + avgSchoolRating + avgSchoolSize + MedianStudentsPerTeacher + numOfBathrooms + numOfBedrooms + numOfStories + houseAge + property_age_category + total_amenities + saleYear + saleMonth + season + crossCluster
+
+# removing few features " avgSchoolDistance + avgSchoolRating + avgSchoolSize + MedianStudentsPerTeacher " as they have low correlation 
+
+formulaa2 = logLatestPrice ~  zipcode + latitude + longitude + garageSpaces + latest_salemonth + latest_saleyear + numOfPhotos + lotSizeSqFt + livingAreaSqFt + numOfBathrooms + numOfBedrooms + numOfStories + houseAge + property_age_category + total_amenities + saleYear + saleMonth + season + crossCluster
+
+formulaa3 = logLatestPrice ~  zipcode + latitude + longitude + garageSpaces + latest_salemonth + latest_saleyear + numOfPhotos + lotSizeSqFt + livingAreaSqFt + avgSchoolDistance + avgSchoolRating + avgSchoolSize + MedianStudentsPerTeacher + numOfBathrooms + numOfBedrooms + numOfStories + houseAge + property_age_category + total_amenities + saleYear + saleMonth + season + crossCluster + hasAssociation + hasGarage + hasSpa + hasView
+  
+```
+
+
+## Modeling
+### Split the Data into Training and Test Sets
+```{r train_test_split}
+# Split the data into training and test sets
+train_ix = createDataPartition(austin_data$logLatestPrice, p = 0.8)
+austin_train = austin_data[train_ix$Resample1,]
+austin_test  = austin_data[-train_ix$Resample1,]
+```
+
+### Regression Tree
+```{r regression_tree}
+# Fit a regression tree
+single_big_tree_model <- rpart(
+  formulaa, 
+  data = austin_train, 
+  method = 'anova',
+  control = rpart.control(minsplit = 2, cp = .0001)
+)
+
+# Plot the tree
+plot(single_big_tree_model)
+
+# Size of the big tree
+nbig <- length(unique(single_big_tree_model$where))
+cat('Size of Single Big Tree:', nbig, '\n')
+
+# Predict on test data
+predictions <- predict(single_big_tree_model, newdata = austin_test)
+
+# Calculate MSE
+big_mse <- mean((austin_test$latestPrice - exp(predictions))^2)
+cat('MSE for Single Big Tree:', big_mse, '\n')
+big_rmse <- sqrt(big_mse)
+cat('RMSE for Single Big Tree:', big_rmse, '\n')
+```
+
+### Pruning the Tree
+```{r prune_tree}
+# Cross-validation and pruning
+plotcp(single_big_tree_model) # Cross validating on cp values
+
+bestcp <- single_big_tree_model$cptable[which.min(single_big_tree_model$cptable[, 'xerror']), 'CP']
+cat('Best CP:', bestcp, '\n')
+
+best_tree <- prune(single_big_tree_model, cp = bestcp)
+rpart.plot(best_tree, type = 4, under = TRUE, faclen = 0, cex = 0.8, tweak = 0.5, box.palette = "Blues", shadow.col = "gray", nn = TRUE)
+
+# Size of the pruned tree
+nbest <- length(unique(best_tree$where))
+cat('Size of Pruned Tree:', nbest, '\n')
+
+# Predict on test data
+pruned_predictions <- predict(best_tree, newdata = austin_test)
+
+# Calculate MSE
+pruned_mse <- mean((austin_test$latestPrice - exp(pruned_predictions))^2)
+cat('MSE for Pruned Tree:', pruned_mse, '\n')
+pruned_rmse <- sqrt(pruned_mse)
+cat('RMSE for Pruned Tree:', pruned_rmse, '\n')
+```
+
+### Bagging with Random Forest
+```{r bagging_rf}
+# Bagging using random forest
+bagging_rf <- randomForest(
+  formulaa, 
+  data = austin_train, mtry = 21, importance = TRUE
+)
+
+# Predictions and MSE
+log_predictions_bagging <- predict(bagging_rf, newdata = austin_test)
+bagging_mse <- mean((austin_test$latestPrice - exp(log_predictions_bagging))^2)
+cat('MSE for Bagging:', bagging_mse, '\n')
+bagging_rmse <- sqrt(bagging_mse)
+cat('RMSE for Bagging:', bagging_rmse, '\n')
+```
+
+### Variable Importance
+```{r variable_importance}
+# Importance of variables
+importance(bagging_rf)
+varImpPlot(bagging_rf)
+```
+
+### Random Forest
+```{r random_forest}
+# Random forest with different mtry values
+num_mtry_values <- c(4, 5, 6, 7, 8, 9)
+rf_results <- matrix(NA, nrow = length(num_mtry_values), ncol = 3)
+colnames(rf_results) <- c("num_mtry", "MSE", "RMSE")
+
+for (index in 1:length(num_mtry_values)) {
+  num_mtry <- num_mtry_values[index]
+  rf_model <- randomForest(
+    formulaa, 
+    data = austin_train, mtry = num_mtry, importance = TRUE
+  )
+
+  log_predictions_rf <- predict(rf_model, newdata = austin_test)
+  mse_rf <- mean((austin_test$latestPrice - exp(log_predictions_rf))^2)
+  rf_results[index, ] <- c(num_mtry, mse_rf, sqrt(mse_rf))
+  print("---")
+}
+results_df <- as.data.frame(rf_results)
+colnames(results_df) <- c("num_mtry", "MSE", "RMSE")
+print(results_df)
+
+# Train the final random forest model with the best mtry value
+best_num_mtry <- results_df$num_mtry[which.min(results_df$MSE)]
+best_rf_model <- randomForest(
+  formulaa, 
+  data = austin_train, mtry = best_num_mtry, importance = TRUE
+)
+
+# Importance of variables
+importance(best_rf_model)
+varImpPlot(best_rf_model)
+```
+
+### XGBoost Model
+```{r xgboost}
+library(xgboost)
+
+f <- c( 
+  "zipcode" ,"latitude" , "longitude","garageSpaces","latest_salemonth" ,"latest_saleyear" ,"numOfPhotos","lotSizeSqFt","livingAreaSqFt" ,
+  "numOfBathrooms" ,"numOfBedrooms","numOfStories",
+  "houseAge","property_age_category","total_amenities","saleYear" ,"saleMonth","season","crossCluster"  
+)
+
+# Prepare training and test data
+#x_train <- as.data.frame(austin_train[f])
+x_train <- as.data.frame(austin_train[, -which(names(austin_train) %in% c("loglatestPrice", "latestPrice"))])
+y_train <- austin_train$logLatestPrice
+x_test <- as.data.frame(austin_test[, -which(names(austin_test) %in% c("loglatestPrice", "latestPrice"))])
+y_test <- austin_test$logLatestPrice
+
+# Convert the data to matrix format for XGBoost
+X_train_matrix <- model.matrix(~., data = x_train)[, -1]
+X_test_matrix <- model.matrix(~., data = x_test)[, -1]
+
+dtrain <- xgb.DMatrix(data = X_train_matrix, label = y_train)
+dtest <- xgb.DMatrix(data = X_test_matrix, label = y_test)
+
+# Set parameters for XGBoost
+params <- list(
+  objective = "reg:squarederror", 
+  eta = 0.1, 
+  max_depth = 6,
+  subsample = 0.7,
+  colsample_bytree = 0.7
+)
+
+# Train the model
+set.seed(42)
+xgb_model <- xgb.train(params, dtrain, nrounds = 100)
+
+# Make predictions on the test set
+xgb_pred <- predict(xgb_model, dtest)
+xgb_pred_exp <- exp(xgb_pred)
+
+# Calculate MSE and RMSE for XGBoost
+xgb_mse <- mean((exp(y_test) - xgb_pred_exp)^2)
+xgb_rmse <- sqrt(xgb_mse)
+cat('MSE for XGBoost:', xgb_mse, '\n')
+cat('RMSE for XGBoost:', xgb_rmse, '\n')
+```
+
+### Bayesian Additive Regression Trees (BART)
+```{r bart}
+# Data Preparation for BART
+X_train_matrix <- model.matrix(~., data = x_train)[, -1]
+X_test_matrix <- model.matrix(~., data = x_test)[, -1]
+
+# Fit the BART model
+set.seed(42)
+bart_model <- wbart(x.train = X_train_matrix, y.train = y_train, x.test = X_test_matrix)
+
+# Predictions
+pred <- bart_model$yhat.test.mean
+yhat_bart <- exp(pred)
+
+# Calculate MSE and RMSE for BART
+y_test_exp <- exp(y_test)
+bart_mse <- mean((y_test_exp - yhat_bart)^2)
+bart_rmse <- sqrt(bart_mse)
+cat('MSE for BART:', bart_mse, '\n')
+cat('RMSE for BART:', bart_rmse, '\n')
+```
+
+### Ridge and Lasso Regression
+```{r ridge_lasso}
+library(glmnet)
+
+# Preparing data for Ridge and Lasso Regression
+X_train <- model.matrix(formulaa3, data = austin_train)
+y_train <- austin_train$logLatestPrice
+X_test <- model.matrix(formulaa3, data = austin_test)
+y_test <- austin_test$logLatestPrice
+
+# Ridge Regression
+ridge_model <- cv.glmnet(X_train, y_train, alpha = 0)
+ridge_pred <- predict(ridge_model, s = ridge_model$lambda.min, newx = X_test)
+
+# Transform predictions back to original scale
+ridge_pred_exp <- exp(ridge_pred)
+
+# Calculate MSE and RMSE
+ridge_mse <- mean((exp(y_test) - ridge_pred_exp)^2)
+ridge_rmse <- sqrt(ridge_mse)
+cat('MSE for Ridge Regression:', ridge_mse, '\n')
+cat('RMSE for Ridge Regression:', ridge_rmse, '\n')
+
+# Lasso Regression
+lasso_model <- cv.glmnet(X_train, y_train, alpha = 1)
+lasso_pred <- predict(lasso_model, s = lasso_model$lambda.min, newx = X_test)
+
+# Transform predictions back to original scale
+lasso_pred_exp <- exp(lasso_pred)
+
+# Calculate MSE and RMSE
+lasso_mse <- mean((exp(y_test) - lasso_pred_exp)^2)
+lasso_rmse <- sqrt(lasso_mse)
+cat('MSE for Lasso Regression:', lasso_mse, '\n')
+cat('RMSE for Lasso Regression:', lasso_rmse, '\n')
+```
+## Model Comparison and Conclusion
+
+### Model Performance Summary
+```{r model_summary}
+# Create a summary table of the model performances
+model_performance <- data.frame(
+  Model = c("Single Tree", "Pruned Tree", "Bagging", "Random Forest", "XGBoost", "BART", "Ridge Regression", "Lasso Regression"),
+  MSE = c(big_mse, pruned_mse, bagging_mse, min(results_df$MSE), xgb_mse, bart_mse, ridge_mse, lasso_mse),
+  RMSE = c(big_rmse, pruned_rmse, bagging_rmse, min(results_df$RMSE), xgb_rmse, bart_rmse, ridge_rmse, lasso_rmse)
+)
+
+# Print the summary table
+print(model_performance)
+
+# Plotting the model performances for visual comparison
+library(ggplot2)
+ggplot(model_performance, aes(x = Model, y = RMSE, fill = Model)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  labs(title = "Model Performance Comparison", y = "RMSE", x = "Model") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+### Conclusion
+The various models applied to the Austin housing data have shown different levels of effectiveness. Below are the key insights from each model:
+
+**Inference**:
+
+- **Single Tree**: While simple and interpretable, this model had the highest RMSE, indicating the lowest predictive accuracy among the models tested.
+- **Pruned Tree**: Slightly better than the single tree, but still resulted in high RMSE, showing that even after pruning, the decision tree struggled to capture the complexity of the data.
+- **Bagging**: Improved performance by reducing variance, showcasing the benefits of ensemble methods. However, it still did not outperform the more sophisticated models.
+- **Random Forest**: Demonstrated strong performance by effectively reducing overfitting and capturing more complex patterns in the data. Fine-tuning `mtry` further enhanced its accuracy.
+- **XGBoost**: Achieved a significant reduction in RMSE compared to Random Forest, highlighting the effectiveness of gradient boosting in handling various data complexities.
+- **BART**: Outperformed all other models, achieving the lowest RMSE, indicating its superior ability to capture complex relationships in the data.
+- **Ridge Regression**: While it managed multicollinearity, its performance was moderate, indicating that linear models with regularization might not fully capture the non-linear patterns in the data.
+- **Lasso Regression**: Performed better than Ridge Regression by also performing feature selection, reducing RMSE compared to Ridge, but still not matching the performance of tree-based methods.
+
+Overall, **BART** and **XGBoost** emerged as the top performers in this analysis, with **BART** having a slight edge in terms of RMSE. These models are well-suited for capturing complex, non-linear relationships in the data. Future efforts should focus on further tuning these models and exploring additional advanced techniques to enhance prediction accuracy.
+**Future Work**:
+- Further hyperparameter tuning for models like XGBoost and Random Forest.
+- Exploring more advanced feature engineering techniques.
+- Considering additional ensemble methods like stacking to further improve predictions.
+
+Overall, Random Forest and XGBoost are the top performers in this analysis, with Random Forest having a slight edge in terms of MSE and RMSE.
+
+## Doing the teating on Austin Holdout set
+
+```{r Holdout set & feature eng}
+library(BART)
+library(dplyr)
+
+# Load the holdout dataset
+holdout_data <- read.csv("austinhouses_holdout.csv")
+
+# Adding the logLatestPrice to the original df
+holdout_data <- holdout_data %>%
+  select(-streetAddress, -description) %>%
+  mutate(logLatestPrice = log(latestPrice))
+
+# Derive the age of the house
+current_year <- year(Sys.Date())
+holdout_data <- holdout_data %>%
+  mutate(houseAge = current_year - yearBuilt,
+         property_age_category = cut(houseAge, 
+                                     breaks = c(-Inf, 10, 30, 50, Inf), 
+                                     labels = c("New", "Moderate", "Old", "Very Old")),
+         property_age_category = as.factor(property_age_category)) %>%
+  select(-yearBuilt)
+
+### Binary Columns and Amenities
+# Convert binary columns to numeric and aggregate amenities
+# Convert binary columns to numeric
+binary_columns <- c('hasAssociation', 'hasGarage', 'hasSpa', 'hasView')
+holdout_data[binary_columns] <- lapply(holdout_data[binary_columns], as.numeric)
+
+
+# Create a total_amenities feature
+holdout_data <- holdout_data %>%
+  mutate(total_amenities = rowSums(select(., all_of(binary_columns))))
+# Ensure we retain the individual binary features
+
+### Sale Date Features
+# Extract and convert sale date components
+holdout_data <- holdout_data %>%
+  mutate(saleDate = as.Date(latest_saledate, format = "%Y-%m-%d"),
+         saleYear = year(latest_saledate),
+         saleMonth = month(latest_saledate),
+         saleDay = day(latest_saledate)) %>%
+  mutate(season = case_when(
+    saleMonth %in% c(12, 1, 2) ~ "Winter",
+    saleMonth %in% c(3, 4, 5) ~ "Spring",
+    saleMonth %in% c(6, 7, 8) ~ "Summer",
+    saleMonth %in% c(9, 10, 11) ~ "Fall"
+  )) %>%
+  mutate(season = factor(season, levels = c("Winter", "Spring", "Summer", "Fall"))) %>%
+  select(-latest_saledate, -saleDay, -saleDate)
+
+### Geospatial Features
+# Clustering based on latitude and longitude
+set.seed(123)
+coords <- holdout_data %>% select(latitude, longitude)
+clusters <- kmeans(coords, centers = 5)$cluster
+holdout_data <- holdout_data %>% mutate(crossCluster = as.factor(clusters))
+
+### Calculating Correlations and Aggregating Amenities
+# Calculate correlations and aggregate amenities with weights
+amenity_features <- c("numOfAccessibilityFeatures", "numOfAppliances", "numOfParkingFeatures",
+                      "numOfPatioAndPorchFeatures", "numOfSecurityFeatures", "numOfWaterfrontFeatures",
+                      "numOfWindowFeatures", "numOfCommunityFeatures")
+
+
+weights <- c(numOfAccessibilityFeatures = 1, numOfAppliances = 2, numOfParkingFeatures = 1.5,
+             numOfPatioAndPorchFeatures = 1, numOfSecurityFeatures = 1, numOfWaterfrontFeatures = 2.5,
+             numOfWindowFeatures = 1, numOfCommunityFeatures = 1.5)
+
+holdout_data <- holdout_data %>%
+  mutate(total_amenities = numOfAccessibilityFeatures * weights["numOfAccessibilityFeatures"] +
+                          numOfAppliances * weights["numOfAppliances"] +
+                          numOfParkingFeatures * weights["numOfParkingFeatures"] +
+                          numOfPatioAndPorchFeatures * weights["numOfPatioAndPorchFeatures"]+
+                          numOfSecurityFeatures * weights["numOfSecurityFeatures"] +
+                          numOfWaterfrontFeatures * weights["numOfWaterfrontFeatures"] +
+                          numOfWindowFeatures * weights["numOfWindowFeatures"] +
+                          numOfCommunityFeatures * weights["numOfCommunityFeatures"]) %>%
+  select(-all_of(amenity_features))
+
+### Handling Missing Values
+# Handling missing values
+holdout_data[is.na(holdout_data)] <- -1
+holdout_data <- holdout_data %>%
+  drop_na()
+
+# Convert categorical variables to factors
+holdout_data <- holdout_data %>%
+  mutate(
+    zipcode = as.factor(zipcode),
+    garageSpaces = factor(garageSpaces),
+    homeType = factor(homeType)
+  ) %>%
+  select(-homeType) #removing Hometype becuase 
+# glimpse(austin_data)
+head(holdout_data)
+```
+
+
+```{r Using BART on Testing data}
+
+# Prepare training and test data
+x_train <- as.data.frame(austin_data[f])
+#x_train <- as.data.frame(austin_data[, -which(names(austin_data) %in% c("loglatestPrice", "latestPrice"))])
+y_train <- austin_data$logLatestPrice
+x_test <- as.data.frame(holdout_data[f])
+#x_test <- as.data.frame(holdout_data[, -which(names(holdout_data) %in% c("loglatestPrice", "latestPrice"))])
+y_test <- holdout_data$logLatestPrice
+
+# Convert the data to matrix format for XGBoost
+X_train_matrix <- model.matrix(~., data = x_train)[, -1]
+X_test_matrix <- model.matrix(~., data = x_test)[, -1]
+
+dtrain <- xgb.DMatrix(data = X_train_matrix, label = y_train)
+dtest <- xgb.DMatrix(data = X_test_matrix, label = y_test)
+
+# Data Preparation for BART
+X_train_matrix <- model.matrix(~., data = x_train)[, -1]
+X_test_matrix <- model.matrix(~., data = x_test)[, -1]
+
+# Fit the BART model
+set.seed(42)
+bart_model <- wbart(x.train = X_train_matrix, y.train = y_train, x.test = X_test_matrix)
+
+# Predictions
+pred <- bart_model$yhat.test.mean
+holdout_data$latestPrice <- exp(pred)
+
+```
+
+```{r Exporting the file}
+# Export the updated holdout dataset
+write.csv(holdout_data, "austinhouses_holdout_predictions.csv", row.names = FALSE)
+```
